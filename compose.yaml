@@ -1,0 +1,11 @@
+# v0.1 skeleton: app only. Postgres joins this file in v0.3-enrichment, where storage begins.
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

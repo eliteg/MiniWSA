@@ -58,6 +58,11 @@ event by its index in the batch and why it failed:
   "invalidEvents": [ { "index": 0, "errors": ["eventId: must not be blank"] } ] }
 ```
 
+`invalidEvents` is **as precise as the failure allows**: missing/invalid required fields are
+reported for **every** offending event in the batch; a value the parser rejects (bad enum or
+timestamp) is reported for the **first** such event (parsing stops there); and JSON that can't be
+parsed at all has no event to point to, so `invalidEvents` is empty and the reason is in `error`.
+
 Required fields: `eventId`, `timestamp`, `configId`, `clientIp`, `path`, `rule.severity`,
 `rule.category`, `action`. All other fields are optional.
 

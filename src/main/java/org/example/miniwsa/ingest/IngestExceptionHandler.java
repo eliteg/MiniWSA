@@ -18,7 +18,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
  * invalid event (which event, which field, allowed values); unparseable JSON has no index, so its
  * {@code invalidEvents} is empty and the reason is in {@code error}.
  */
-@RestControllerAdvice(assignableTypes = IngestController.class)
+@RestControllerAdvice(assignableTypes = {IngestController.class, AsyncIngestController.class})
 public class IngestExceptionHandler {
 
     @ExceptionHandler(HttpMessageNotReadableException.class)

@@ -1,6 +1,7 @@
-package org.example.miniwsa.enrichment;
+package org.example.miniwsa;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -11,6 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import org.example.miniwsa.alert.AlertResult;
 import org.example.miniwsa.event.Category;
 import org.example.miniwsa.samples.SampledEvent;
@@ -33,9 +35,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Testcontainers
-class RepeatOffenderIntegrationTest {
+abstract class ApiScenarioIntegrationTest {
 
-    private static final Logger log = LoggerFactory.getLogger(RepeatOffenderIntegrationTest.class);
+    private static final Logger log = LoggerFactory.getLogger(ApiScenarioIntegrationTest.class);
     private static final ObjectMapper PRETTY = new ObjectMapper()
             .registerModule(new JavaTimeModule())
             .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
@@ -49,6 +51,8 @@ class RepeatOffenderIntegrationTest {
 
     @Autowired private TestRestTemplate http;
     @Autowired private JdbcTemplate jdbc;
+
+    abstract String version();
 
     @BeforeEach
     void cleanDb() {
@@ -75,6 +79,7 @@ class RepeatOffenderIntegrationTest {
         String bgIp   = "9.8.7.6";
         Instant base  = Instant.now().minusSeconds(600);
         List<String> savedFiles = new ArrayList<>();
+        String v = "/" + version();
 
         log.info("{}", title("SCENARIO 1 — Wave/burst detection: 10 events from " + waveIp));
 
@@ -85,16 +90,20 @@ class RepeatOffenderIntegrationTest {
         }
         events.add(buildBotEvent("bg-0", bgIp, base));
 
-        log.info("  → POST /v1/events/ingest  [11 BOT events: 10 wave + 1 background]");
-        ResponseEntity<String> ingest = http.postForEntity("/v1/events/ingest", events, String.class);
-        assertThat(ingest.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        String ingestPath = v + "/events/ingest";
+        log.info("  → POST {}  [11 BOT events: 10 wave + 1 background]", ingestPath);
+        ResponseEntity<String> ingest = http.postForEntity(ingestPath, events, String.class);
+        HttpStatus expectedStatus = "v1".equals(version()) ? HttpStatus.CREATED : HttpStatus.ACCEPTED;
+        assertThat(ingest.getStatusCode()).isEqualTo(expectedStatus);
 
-        log.info("{}", title("POST /v1/events/ingest"));
+        log.info("{}", title("POST " + ingestPath));
         log.info("{}", subtitle("Response", PRETTY.readTree(ingest.getBody()).toPrettyString()));
 
+        awaitStored(11);
+
         // ── stats ─────────────────────────────────────────────────────────────
-        log.info("{}", title("GET  /v1/events/stats"));
-        String rawStats = http.getForEntity("/v1/events/stats", String.class).getBody();
+        log.info("{}", title("GET  " + v + "/events/stats"));
+        String rawStats = http.getForEntity(v + "/events/stats", String.class).getBody();
         StatsResponse stats = PRETTY.readValue(rawStats, StatsResponse.class);
         savedFiles.add(save("scenario-1", "stats", rawStats));
 
@@ -111,7 +120,7 @@ class RepeatOffenderIntegrationTest {
 
         // ── samples — paginated (limit=2) ─────────────────────────────────────
         log.info("{}", title(
-                "GET /v1/events/samples?category={category}&limit={limit}&offset={offset}&from={ISO8601}"));
+                "GET " + v + "/events/samples?category={category}&limit={limit}&offset={offset}&from={ISO8601}"));
 
         int limit = 2;
         List<SampledEvent> allSampled = new ArrayList<>();
@@ -119,7 +128,7 @@ class RepeatOffenderIntegrationTest {
         int offset = 0;
         long totalEvents = 0;
         while (true) {
-            String url = "/v1/events/samples?category=BOT&limit=" + limit
+            String url = v + "/events/samples?category=BOT&limit=" + limit
                     + "&offset=" + offset + "&from=2000-01-01T00:00:00Z";
             pageUrls.add(url);
             String raw = http.getForEntity(url, String.class).getBody();
@@ -143,15 +152,15 @@ class RepeatOffenderIntegrationTest {
         assertThat(allSampled.stream().filter(e -> e.threatScore() > 20).count()).isEqualTo(5);
 
         // ── alerts ────────────────────────────────────────────────────────────
-        log.info("{}", title("POST /v1/alerts/define  +  GET /v1/alerts/evaluate"));
+        log.info("{}", title("POST " + v + "/alerts/define  +  GET " + v + "/alerts/evaluate"));
 
-        log.info("  → POST /v1/alerts/define  [category=BOT  threshold=5  windowMinutes=20]");
-        http.postForEntity("/v1/alerts/define",
+        log.info("  → POST {}/alerts/define  [category=BOT  threshold=5  windowMinutes=20]", v);
+        http.postForEntity(v + "/alerts/define",
                 Map.of("category", "BOT", "threshold", 5, "windowMinutes", 20),
                 String.class);
 
-        log.info("  → GET  /v1/alerts/evaluate");
-        String rawAlerts = http.getForEntity("/v1/alerts/evaluate", String.class).getBody();
+        log.info("  → GET  {}/alerts/evaluate", v);
+        String rawAlerts = http.getForEntity(v + "/alerts/evaluate", String.class).getBody();
         List<AlertResult> alerts = PRETTY.readValue(rawAlerts,
                 PRETTY.getTypeFactory().constructCollectionType(List.class, AlertResult.class));
         savedFiles.add(save("scenario-1", "alerts", rawAlerts));
@@ -177,29 +186,34 @@ class RepeatOffenderIntegrationTest {
     void scenario2_invalidBatchIsFullyRejected() throws Exception {
         Instant base = Instant.now().minusSeconds(300);
         List<String> savedFiles = new ArrayList<>();
+        String v = "/" + version();
+        String ingestPath = v + "/events/ingest";
 
         // ── phase 1: valid batch ──────────────────────────────────────────────
-        log.info("{}", title("SCENARIO 2 — Phase 1: valid batch (expect 201)"));
+        log.info("{}", title("SCENARIO 2 — Phase 1: valid batch"));
 
         List<Map<String, Object>> valid = List.of(
                 buildBotEvent("v0", "1.1.1.1", base),
                 buildBotEvent("v1", "1.1.1.1", base.plusSeconds(60)));
 
-        log.info("  → POST /v1/events/ingest  [2 valid BOT events]");
-        ResponseEntity<String> ok = http.postForEntity("/v1/events/ingest", valid, String.class);
-        assertThat(ok.getStatusCode().value()).isEqualTo(201);
-        log.info("{}", title("POST /v1/events/ingest"));
+        log.info("  → POST {}  [2 valid BOT events]", ingestPath);
+        ResponseEntity<String> ok = http.postForEntity(ingestPath, valid, String.class);
+        HttpStatus expectedStatus = "v1".equals(version()) ? HttpStatus.CREATED : HttpStatus.ACCEPTED;
+        assertThat(ok.getStatusCode()).isEqualTo(expectedStatus);
+        log.info("{}", title("POST " + ingestPath));
         log.info("{}", subtitle("Response", PRETTY.readTree(ok.getBody()).toPrettyString()));
 
-        log.info("{}", title("GET  /v1/events/stats"));
-        String rawStats1 = http.getForEntity("/v1/events/stats", String.class).getBody();
+        awaitStored(2);
+
+        log.info("{}", title("GET  " + v + "/events/stats"));
+        String rawStats1 = http.getForEntity(v + "/events/stats", String.class).getBody();
         savedFiles.add(save("scenario-2/phase-1", "stats", rawStats1));
         log.info("{}", subtitle("Response", PRETTY.readTree(rawStats1).toPrettyString()));
         assertThat(PRETTY.readValue(rawStats1, StatsResponse.class).totalEvents()).isEqualTo(2);
 
-        log.info("{}", title("GET  /v1/events/samples?from={ISO8601}"));
+        log.info("{}", title("GET  " + v + "/events/samples?from={ISO8601}"));
         String rawSamples1 = http.getForEntity(
-                "/v1/events/samples?from=2000-01-01T00:00:00Z", String.class).getBody();
+                v + "/events/samples?from=2000-01-01T00:00:00Z", String.class).getBody();
         savedFiles.add(save("scenario-2/phase-1", "samples", rawSamples1));
         log.info("{}", subtitle("Response", PRETTY.readTree(rawSamples1).toPrettyString()));
         assertThat(PRETTY.readValue(rawSamples1, SamplesResponse.class).total()).isEqualTo(2);
@@ -219,20 +233,20 @@ class RepeatOffenderIntegrationTest {
                 "path",      "/api/v1/data",
                 "rule",      Map.of("severity", "MEDIUM", "category", "BOT")));
 
-        log.info("  → POST /v1/events/ingest  [3 events, index 2 missing 'action']");
-        ResponseEntity<String> bad = http.postForEntity("/v1/events/ingest", invalid, String.class);
+        log.info("  → POST {}  [3 events, index 2 missing 'action']", ingestPath);
+        ResponseEntity<String> bad = http.postForEntity(ingestPath, invalid, String.class);
         assertThat(bad.getStatusCode().value()).isEqualTo(400);
-        log.info("{}", title("POST /v1/events/ingest"));
+        log.info("{}", title("POST " + ingestPath));
         log.info("{}", subtitle("Response", PRETTY.readTree(bad.getBody()).toPrettyString()));
 
-        log.info("{}", title("GET  /v1/events/stats  [expect empty]"));
-        String rawStats2 = http.getForEntity("/v1/events/stats", String.class).getBody();
+        log.info("{}", title("GET  " + v + "/events/stats  [expect empty]"));
+        String rawStats2 = http.getForEntity(v + "/events/stats", String.class).getBody();
         savedFiles.add(save("scenario-2/phase-2", "stats", rawStats2));
         log.info("{}", subtitle("Response", PRETTY.readTree(rawStats2).toPrettyString()));
 
-        log.info("{}", title("GET  /v1/events/samples?from={ISO8601}  [expect empty]"));
+        log.info("{}", title("GET  " + v + "/events/samples?from={ISO8601}  [expect empty]"));
         String rawSamples2 = http.getForEntity(
-                "/v1/events/samples?from=2000-01-01T00:00:00Z", String.class).getBody();
+                v + "/events/samples?from=2000-01-01T00:00:00Z", String.class).getBody();
         savedFiles.add(save("scenario-2/phase-2", "samples", rawSamples2));
         log.info("{}", subtitle("Response", PRETTY.readTree(rawSamples2).toPrettyString()));
 
@@ -247,6 +261,12 @@ class RepeatOffenderIntegrationTest {
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
+
+    private void awaitStored(int expectedCount) {
+        await().atMost(10, TimeUnit.SECONDS).untilAsserted(() ->
+                assertThat(jdbc.queryForObject("SELECT count(*) FROM events", Long.class))
+                        .isEqualTo(expectedCount));
+    }
 
     private static String title(String text) {
         String bar = "*".repeat(text.length() + 8);

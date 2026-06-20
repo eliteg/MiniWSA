@@ -1,4 +1,5 @@
-# Sync stack: the app + Postgres. Liquibase runs the schema migrations on app startup.
+# Default (sync):    docker compose up --build
+# Streaming (async): APP_MODE=async docker compose --profile streaming up --build
 services:
   app:
     build: .
@@ -8,6 +9,8 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/miniwsa
       SPRING_DATASOURCE_USERNAME: miniwsa
       SPRING_DATASOURCE_PASSWORD: miniwsa
+      SPRING_PROFILES_ACTIVE: ${APP_MODE:-sync}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:
       postgres:
         condition: service_healthy
@@ -29,4 +32,26 @@ services:
       test: ["CMD-SHELL", "pg_isready -U miniwsa -d miniwsa"]
       interval: 5s
       timeout: 3s
+      retries: 10
+
+  kafka:
+    profiles: [streaming]
+    image: apache/kafka:3.9.0
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 0
+      KAFKA_PROCESS_ROLES: controller,broker
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 5s
       retries: 10

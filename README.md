@@ -3,19 +3,27 @@
 A backend service that ingests WAF security events, classifies and enriches them with threat
 scores, stores them in PostgreSQL, and exposes analytics over a REST API. Java 21 / Spring Boot 3.
 
+There are two flows. In the **sync flow** events are enriched and stored within the HTTP request —
+the caller gets `201 Created` once the event is durably in the database. In the **async flow** the
+ingest endpoint publishes each event to Kafka and returns `202 Accepted` immediately; a consumer
+runs the same enrichment pipeline in the background. All read APIs (`stats`, `samples`, `alerts`)
+are synchronous in both flows.
+
 ## Prerequisites
 
 - **Docker** (Docker Desktop running) — brings up the app + Postgres in one command.
 - **JDK 21+** — to compile and run tests locally without Docker.
 
-## Build
+## Build & Tests
 
 ```bash
 # compile + unit tests (no Docker needed)
 ./gradlew build
 
-# integration tests (requires Docker for Testcontainers)
-./gradlew integrationTest
+# integration tests — Testcontainers handles all infrastructure automatically
+./gradlew integrationTest              # all flows
+./gradlew integrationTest -Ptag=sync   # sync flow only  (ApiScenarioSyncIT)
+./gradlew integrationTest -Ptag=async  # async flow only (ApiScenarioAsyncIT + KafkaIngestionIntegrationTest)
 
 # all tests
 ./gradlew check
@@ -23,27 +31,47 @@ scores, stores them in PostgreSQL, and exposes analytics over a REST API. Java 2
 
 ## Run
 
+The flow is controlled by the `APP_MODE` environment variable. Both modes start the app on
+**http://localhost:8080** with Postgres included.
+
+**Sync** (default — `APP_MODE=sync`):
 ```bash
-docker compose up --build
+docker compose up --build -d
 ```
 
-The app starts on **http://localhost:8080**. Verify it's up:
-
+**Async** (`APP_MODE=async` — also starts Kafka):
 ```bash
-curl localhost:8080/health
-# {"status":"UP"}
+APP_MODE=async docker compose --profile streaming up --build -d
 ```
 
-Postgres 16 starts automatically. Connect with psql if needed:
-
+Check status:
 ```bash
-docker compose exec postgres psql -U miniwsa -d miniwsa
+docker compose ps                  # container status + health
 ```
+
+Follow logs (open a separate terminal):
+```bash
+docker compose logs -f app         # app logs
+docker compose logs -f kafka       # kafka logs (async only)
+```
+
+To switch between modes, stop with the **same profile** used to start, then restart:
+```bash
+# stop sync
+docker compose down
+
+# stop async (must include --profile streaming — otherwise Kafka is left running)
+docker compose --profile streaming down
+
+# then start the other mode
+APP_MODE=async docker compose --profile streaming up --build -d
+```
+
+Verify: `curl localhost:8080/health` → `{"status":"UP"}`
 
 ## Architecture
 
-**Synchronous pipeline** — enrichment happens inline within the HTTP request before the response
-is returned. No message queue; the caller gets immediate confirmation that events were stored.
+### Sync flow
 
 ```
 POST /v1/events/ingest
@@ -56,13 +84,9 @@ POST /v1/events/ingest
         ▼
 ┌─────────────────────────────────────────────────────┐
 │                  EnrichmentService                  │
-│                                                     │
-│  for each event (in timestamp order):               │
-│                                                     │
 │  ┌──────────────────┐                               │
 │  │   Classifier     │  category → attackType        │
 │  └────────┬─────────┘                               │
-│           │                                         │
 │           ▼                                         │
 │  ┌──────────────────────────┐                       │
 │  │  RepeatOffenderWindow    │  in-memory sliding    │
@@ -77,83 +101,83 @@ POST /v1/events/ingest
 │  │                          │  + repeat offender +15│
 │  └────────┬─────────────────┘                       │
 └───────────┼─────────────────────────────────────────┘
-            │
             ▼
    ┌─────────────────┐
    │   EventStore    │  JdbcTemplate → PostgreSQL 16
-   │   (Postgres 16) │  schema managed by Liquibase
-   └────────┬────────┘
-            │
-     ┌──────┴──────┐
-     ▼             ▼
-GET /v1/events/stats    GET /v1/events/samples
+   └─────────────────┘
+         201 Created
 ```
 
-## Quickest demo (no Docker needed)
+### Async flow
 
-Run the end-to-end integration test — it spins up a real Postgres via Testcontainers, runs the
-full pipeline, and prints every raw API response to the console:
-
-```bash
-./gradlew integrationTest --tests "org.example.miniwsa.enrichment.RepeatOffenderIntegrationTest" --rerun
+```
+POST /v2/events/ingest
+        │
+        ▼
+┌───────────────┐
+│  Validation   │  all-or-nothing: one invalid event rejects the whole batch
+└───────┬───────┘
+        │  202 Accepted (returned immediately)
+        ▼
+┌─────────────────┐
+│  KafkaProducer  │  event published as JSON to waf-events topic
+└────────┬────────┘
+         │
+         ▼
+  [waf-events topic]
+         │
+         ▼
+┌─────────────────┐
+│  KafkaConsumer  │  retries: 2× with 1s backoff → DLQ (waf-events-dlq)
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────┐
+│                  EnrichmentService                  │
+│              (same pipeline as sync)                │
+└────────┬────────────────────────────────────────────┘
+         ▼
+   ┌─────────────────┐
+   │   EventStore    │  JdbcTemplate → PostgreSQL 16
+   └─────────────────┘
 ```
 
-What you'll see in the output:
-- **Ingest** — 10 wave events from the same IP + 1 background event → `201 Created`
-- **Stats** — top attacker at `avgThreatScore=27.5` (repeat-offender +15 fired on events 6–10)
-- **Samples** — individual events with `threatScore=35` for the wave and `threatScore=20` for background
-- **Alerts** — a BOT rule with `threshold=5` firing because `currentCount=11`
+**Dead Letter Queue (DLQ)**
 
-To run all integration tests:
+If the consumer fails to process an event after 2 retries (1 s apart), it is published to
+`waf-events-dlq` and an `ERROR` log line is emitted:
 
-```bash
-./gradlew integrationTest --rerun
+```
+DLQ: event key=<eventId> offset=<n> partition=0 error=<message>
 ```
 
-## Quick demo (full stack)
+The DLQ topic uses Kafka's default retention of **7 days**, after which messages are deleted
+automatically. To inspect queued events manually:
 
-**1. Start the stack** (requires Docker)
 ```bash
-docker compose up --build
-```
-
-**2. Generate and send 10,000 events (30% attack waves)**
-```bash
-./gradlew generateData -Pcount=10000 -Psend=http://localhost:8080
-```
-
-Or generate to a file first, inspect/edit, then send:
-```bash
-./gradlew generateData -Pcount=10000
-curl -X POST localhost:8080/v1/events/ingest \
-  -H 'Content-Type: application/json' \
-  -d @data/events-*.json
-```
-
-**3. Query statistics**
-```bash
-curl -s localhost:8080/v1/events/stats | python3 -m json.tool
-```
-
-**4. Browse individual events**
-```bash
-# first page, newest first
-curl -s "localhost:8080/v1/events/samples?limit=5" | python3 -m json.tool
-
-# filter by category and time range
-curl -s "localhost:8080/v1/events/samples?category=INJECTION&from=2026-06-01T00:00:00Z&limit=5" \
-  | python3 -m json.tool
+docker exec -it miniwsa-kafka-1 /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic waf-events-dlq --from-beginning
 ```
 
 ## API
 
-### `POST /v1/events/ingest`
+### Versioning
 
-Accepts a **single event or an array**. Validation is **all-or-nothing**: if any event is
-invalid, the whole batch is rejected and nothing is stored.
+All endpoints are prefixed with `/{version}/`. The version controls how ingest is handled;
+read endpoints (`stats`, `samples`, `alerts`) behave identically in both versions.
+
+| Version | Ingest endpoint            | Response       | Ingest behaviour                  |
+|---------|----------------------------|----------------|-----------------------------------|
+| v1      | `POST /v1/events/ingest`   | `201 Created`  | Enriched and stored synchronously |
+| v2      | `POST /v2/events/ingest`   | `202 Accepted` | Published to Kafka, stored async  |
+
+### `POST /{version}/events/ingest`
+
+Accepts a single event or an array. Validation is all-or-nothing — one invalid event rejects the
+entire batch (nothing is stored or published).
 
 ```bash
-curl -X POST localhost:8080/v1/events/ingest -H 'Content-Type: application/json' -d '{
+curl -X POST localhost:8080/{version}/events/ingest -H 'Content-Type: application/json' -d '{
   "eventId": "evt-1",
   "timestamp": "2026-05-20T14:32:10Z",
   "configId": 14227,
@@ -164,10 +188,26 @@ curl -X POST localhost:8080/v1/events/ingest -H 'Content-Type: application/json'
 }'
 ```
 
-Required fields: `eventId`, `timestamp`, `configId`, `clientIp`, `path`, `rule.severity`,
-`rule.category`, `action`. All other fields are optional.
+| Field           | Type                                                     | Required |
+|-----------------|----------------------------------------------------------|----------|
+| `eventId`       | string                                                   | ✓        |
+| `timestamp`     | ISO-8601                                                 | ✓        |
+| `configId`      | long                                                     | ✓        |
+| `clientIp`      | string                                                   | ✓        |
+| `path`          | string                                                   | ✓        |
+| `rule.severity` | `CRITICAL` `HIGH` `MEDIUM` `LOW`                         | ✓        |
+| `rule.category` | `INJECTION` `XSS` `BOT` `BRUTE_FORCE` `SCANNER` `OTHER` | ✓        |
+| `action`        | `DENY` `ALERT` `MONITOR`                                 | ✓        |
+| `policyId`      | string                                                   |          |
+| `hostname`      | string                                                   |          |
+| `httpMethod`    | string                                                   |          |
+| `httpStatus`    | int                                                      |          |
+| `userAgent`     | string                                                   |          |
+| `geoLocation`   | `{ "countryCode": "US", "city": "New York" }`            |          |
+| `requestSize`   | int                                                      |          |
+| `responseTime`  | int                                                      |          |
 
-**`201 Created`**
+**`201 Created`** (v1) / **`202 Accepted`** (v2)
 ```json
 { "accepted": 1, "receivedAt": "2026-06-19T20:15:42.123Z" }
 ```
@@ -178,18 +218,18 @@ Required fields: `eventId`, `timestamp`, `configId`, `clientIp`, `path`, `rule.s
   "invalidEvents": [ { "index": 0, "errors": ["eventId: must not be blank"] } ] }
 ```
 
-### `GET /v1/events/stats`
+### `GET /{version}/events/stats`
 
 Returns aggregated analytics over stored events.
 
-| Parameter  | Type        | Description                          |
-|------------|-------------|--------------------------------------|
-| `configId` | long        | Filter to a specific config          |
-| `from`     | ISO-8601    | Start of time range                  |
-| `to`       | ISO-8601    | End of time range                    |
+| Parameter  | Type     | Description                 |
+|------------|----------|-----------------------------|
+| `configId` | long     | Filter to a specific config |
+| `from`     | ISO-8601 | Start of time range         |
+| `to`       | ISO-8601 | End of time range           |
 
 ```bash
-curl -s "localhost:8080/v1/events/stats?configId=14227&from=2026-06-01T00:00:00Z" \
+curl -s "localhost:8080/{version}/events/stats?configId=14227&from=2026-06-01T00:00:00Z" \
   | python3 -m json.tool
 ```
 
@@ -203,68 +243,64 @@ curl -s "localhost:8080/v1/events/stats?configId=14227&from=2026-06-01T00:00:00Z
 }
 ```
 
-### `GET /v1/events/samples`
+### `GET /{version}/events/samples`
 
 Returns paginated individual event records.
 
-| Parameter  | Type     | Default       | Description                        |
-|------------|----------|---------------|------------------------------------|
-| `configId` | long     | —             | Filter by config                   |
-| `from`     | ISO-8601 | last 24 hours | Start of time range                |
-| `to`       | ISO-8601 | —             | End of time range                  |
-| `category` | string   | —             | `INJECTION`, `XSS`, `BOT`, …       |
-| `action`   | string   | —             | `DENY`, `ALERT`, `MONITOR`         |
-| `limit`    | int      | 20 (max 100)  | Page size                          |
-| `offset`   | int      | 0             | Pagination offset                  |
+| Parameter  | Type     | Default       | Description                  |
+|------------|----------|---------------|------------------------------|
+| `configId` | long     | —             | Filter by config             |
+| `from`     | ISO-8601 | last 24 hours | Start of time range          |
+| `to`       | ISO-8601 | —             | End of time range            |
+| `category` | string   | —             | `INJECTION` `XSS` `BOT` …   |
+| `action`   | string   | —             | `DENY` `ALERT` `MONITOR`     |
+| `limit`    | int      | 20 (max 100)  | Page size                    |
+| `offset`   | int      | 0             | Pagination offset            |
 
 ```bash
-curl -s "localhost:8080/v1/events/samples?category=INJECTION&limit=10" | python3 -m json.tool
+curl -s "localhost:8080/{version}/events/samples?category=INJECTION&limit=10" | python3 -m json.tool
 ```
 
-### `POST /v1/alerts/define`
+### `POST /{version}/alerts/define`
 
 Defines an alert rule: fire when the count of events in a given category exceeds `threshold`
 within the last `windowMinutes` minutes.
 
 ```bash
-curl -X POST localhost:8080/v1/alerts/define -H 'Content-Type: application/json' -d '{
+curl -X POST localhost:8080/{version}/alerts/define -H 'Content-Type: application/json' -d '{
   "category": "BOT",
   "threshold": 5,
   "windowMinutes": 10
 }'
 ```
 
-Required fields: `category` (`INJECTION`, `XSS`, `BOT`, `BRUTE_FORCE`, `SCANNER`, `OTHER`),
-`threshold` (≥ 1), `windowMinutes` (≥ 1).
+| Field           | Type                                                     | Required |
+|-----------------|----------------------------------------------------------|----------|
+| `category`      | `INJECTION` `XSS` `BOT` `BRUTE_FORCE` `SCANNER` `OTHER` | ✓        |
+| `threshold`     | int (≥ 1)                                                | ✓        |
+| `windowMinutes` | int (≥ 1)                                                | ✓        |
 
 **`201 Created`**
 ```json
 { "id": 1, "category": "BOT", "threshold": 5, "windowMinutes": 10, "createdAt": "2026-06-20T08:00:00Z" }
 ```
 
-### `GET /v1/alerts/evaluate`
+### `GET /{version}/alerts/evaluate`
 
-Evaluates all defined rules against current event counts and returns their firing status.
+Evaluates all defined rules against current event counts.
 
 ```bash
-curl -s localhost:8080/v1/alerts/evaluate | python3 -m json.tool
+curl -s localhost:8080/{version}/alerts/evaluate | python3 -m json.tool
 ```
 
 ```json
 [
   {
-    "ruleId": 1,
-    "category": "BOT",
-    "threshold": 5,
-    "windowMinutes": 10,
-    "currentCount": 11,
-    "firing": true
+    "ruleId": 1, "category": "BOT", "threshold": 5,
+    "windowMinutes": 10, "currentCount": 11, "firing": true
   }
 ]
 ```
-
-`firing` is `true` when `currentCount > threshold`. Implemented as a single LEFT JOIN across all
-rules — one round-trip regardless of how many rules are defined.
 
 ### `GET /health`
 
@@ -273,22 +309,82 @@ curl localhost:8080/health
 # {"status":"UP"}
 ```
 
-### Data generator
+## Data generator
 
-Generates realistic WAF events including attack waves (bursts from the same IP within 10 minutes):
+Generates realistic WAF events with 30% attack waves (bursts from the same IP hitting the same path).
+
+### 1. Start the stack
 
 ```bash
-# generate to file
-./gradlew generateData -Pcount=10000
+# sync (v1)
+docker compose up --build -d
 
-# generate and send directly
+# async (v2) — also starts Kafka
+APP_MODE=async docker compose --profile streaming up --build -d
+```
+
+### 2. Reset the database (optional)
+
+```bash
+./gradlew resetDb
+```
+
+### 3. Generate and send events
+
+**Option A — generate to file, then POST with curl**
+
+The file is written to `data/events-{timestamp}.json` by default, or to a fixed path with `-Poutput`.
+
+```bash
+# generate — file saved to data/events.json
+./gradlew generateData -Pcount=10000 -Poutput=data/events.json
+
+# start the app — sync
+docker compose up --build -d
+
+# start the app — async (also starts Kafka)
+APP_MODE=async docker compose --profile streaming up --build -d
+
+# wait until the app is healthy (check Docker Desktop or poll the health endpoint)
+curl localhost:8080/health   # wait for {"status":"UP"}
+
+# send — sync
+curl -X POST localhost:8080/v1/events/ingest \
+  -H 'Content-Type: application/json' \
+  -d @data/events.json
+
+# send — async
+curl -X POST localhost:8080/v2/events/ingest \
+  -H 'Content-Type: application/json' \
+  -d @data/events.json
+```
+
+**Option B — generate and POST directly via Gradle**
+
+```bash
+# sync
 ./gradlew generateData -Pcount=10000 -Psend=http://localhost:8080
 
-# options
--Pcount=N      number of events (default: 10000)
--Psend=URL     base URL to POST to /v1/events/ingest
--Pbatch=N      batch size when sending (default: 100)
--Poutput=FILE  write to specific file (default: data/events-{timestamp}.json)
+# async
+./gradlew generateData -Pcount=10000 -Psend=http://localhost:8080 -Pv2
+```
+
+| Option          | Description                                      |
+|-----------------|--------------------------------------------------|
+| `-Pcount=N`     | Number of events (default: 10000)                |
+| `-Poutput=FILE` | Output file path (default: `data/events-{ts}.json`) |
+| `-Psend=URL`    | POST directly to the API (base URL)              |
+| `-Pv2`          | Use `/v2/events/ingest` instead of `/v1`         |
+| `-Pbatch=N`     | Batch size when sending (default: 100)           |
+
+### 4. Stop the stack
+
+```bash
+# sync
+docker compose down
+
+# async (must include --profile streaming to also stop Kafka)
+docker compose --profile streaming down
 ```
 
 ## Storage choice

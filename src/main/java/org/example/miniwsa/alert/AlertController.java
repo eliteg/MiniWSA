@@ -11,7 +11,7 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
-@RequestMapping("/v1/alerts")
+@RequestMapping({"/v1/alerts", "/v2/alerts"})
 class AlertController {
 
     private final AlertRepository repository;

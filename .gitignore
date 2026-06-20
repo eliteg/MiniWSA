@@ -40,7 +40,9 @@ bin/
 .DS_Store
 
 ### Internal working notes (not for public repo) ###
-docs/spec-review-decisions.md
+docs/
 
-### Generated demo data ###
+### Generated demo data and local tooling ###
 data/
+postman/
+.postman/

@@ -73,11 +73,13 @@ public class DataGenerator {
         int count     = 10_000;
         int batchSize = 100;
         String sendTo = null;
+        boolean useV2 = false;
 
         for (String arg : args) {
             if (arg.startsWith("--count="))  count     = Integer.parseInt(arg.substring(8));
             if (arg.startsWith("--batch="))  batchSize = Integer.parseInt(arg.substring(8));
             if (arg.startsWith("--send="))   sendTo    = arg.substring(7);
+            if (arg.equals("--v2"))          useV2     = true;
         }
 
         String outputFile = "data/events-" + Instant.now().toString().replace(":", "-") + ".json";
@@ -90,7 +92,7 @@ public class DataGenerator {
         String json = MAPPER.writeValueAsString(events);
 
         if (sendTo != null) {
-            sendInBatches(events, sendTo, batchSize);
+            sendInBatches(events, sendTo, batchSize, useV2);
         } else {
             java.nio.file.Path path = java.nio.file.Path.of(outputFile);
             java.nio.file.Files.createDirectories(path.getParent());
@@ -183,9 +185,9 @@ public class DataGenerator {
     // ── HTTP sender ──────────────────────────────────────────────────────────
 
     private static void sendInBatches(List<Event> events, String baseUrl,
-                                       int batchSize) throws Exception {
+                                       int batchSize, boolean useV2) throws Exception {
         HttpClient client  = HttpClient.newHttpClient();
-        String     url     = baseUrl.replaceAll("/$", "") + "/v1/events/ingest";
+        String     url     = baseUrl.replaceAll("/$", "") + (useV2 ? "/v2" : "/v1") + "/events/ingest";
         int        batches = (events.size() + batchSize - 1) / batchSize;
         int        sent    = 0;
 

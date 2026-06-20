@@ -4,7 +4,8 @@ A backend service that ingests security event records (DLRs), classifies and enr
 stores them, and exposes analytics over a REST API. Java / Spring Boot.
 
 > Work in progress. This README grows with each milestone — it documents only what's built so
-> far. Right now that's the skeleton (`v0.1`) and the ingestion API (`v0.2`).
+> far. Right now that's the skeleton (`v0.1`), the ingestion API (`v0.2`), enrichment (`v0.3`),
+> and storage schema with Postgres (`v0.4`).
 
 ## Prerequisites
 
@@ -23,6 +24,28 @@ The app starts on **http://localhost:8080**. Check it's up:
 curl localhost:8080/health
 # {"status":"UP"}
 ```
+
+## Database
+
+Postgres 16 starts automatically with `docker compose up`. Connect with `psql`:
+
+```bash
+docker compose exec postgres psql -U miniwsa -d miniwsa
+```
+
+Useful queries:
+
+```sql
+-- all events, most recent first
+SELECT event_id, timestamp, client_ip, category, threat_score FROM events ORDER BY timestamp DESC;
+
+-- event counts per category
+SELECT category, count(*) FROM events GROUP BY category ORDER BY count DESC;
+```
+
+Schema is managed by Liquibase and applied on every app startup. Two tables:
+- **`events`** — ingested and enriched security events
+- **`alert_rules`** — configurable alerting thresholds (populated in a later milestone)
 
 ## API
 

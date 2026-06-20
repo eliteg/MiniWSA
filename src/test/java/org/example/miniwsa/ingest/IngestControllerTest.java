@@ -5,22 +5,29 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.time.Instant;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.example.miniwsa.storage.EventStore;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.test.context.ActiveProfiles;
 
 /**
  * API contract for {@code POST /v1/events/ingest} (Part 1, spec §8.1): single + array,
  * {@code 201} on all-valid, {@code 400}-with-details on any invalid (all-or-nothing).
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@ActiveProfiles("test")
 class IngestControllerTest {
+
+    @MockBean
+    EventStore eventStore;
 
     @LocalServerPort
     private int port;

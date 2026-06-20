@@ -1,6 +1,12 @@
 spring:
   application:
     name: mini-wsa
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/miniwsa}
+    username: ${SPRING_DATASOURCE_USERNAME:miniwsa}
+    password: ${SPRING_DATASOURCE_PASSWORD:miniwsa}
+  liquibase:
+    change-log: classpath:db/changelog/db.changelog-master.yaml
   jackson:
     deserialization:
       # Lets a single event object bind to List<Event> as a 1-element list, so the ingest

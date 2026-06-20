@@ -1,0 +1,9 @@
+# Overlay for the "test" profile (activated by @ActiveProfiles("test") on @SpringBootTest unit
+# tests). Loads ON TOP of the main application.yml — so jackson/server config is kept — and only
+# adds the exclusions so the fast suite needs no database.
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+      - org.springframework.boot.autoconfigure.liquibase.LiquibaseAutoConfiguration

@@ -1,11 +1,32 @@
-# v0.1 skeleton: app only. Postgres joins this file in v0.3-enrichment, where storage begins.
+# Sync stack: the app + Postgres. Liquibase runs the schema migrations on app startup.
 services:
   app:
     build: .
     ports:
       - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/miniwsa
+      SPRING_DATASOURCE_USERNAME: miniwsa
+      SPRING_DATASOURCE_PASSWORD: miniwsa
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: miniwsa
+      POSTGRES_USER: miniwsa
+      POSTGRES_PASSWORD: miniwsa
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U miniwsa -d miniwsa"]
       interval: 5s
       timeout: 3s
       retries: 10

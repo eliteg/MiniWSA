@@ -1,0 +1,5 @@
+databaseChangeLog:
+  - include:
+      file: db/changelog/001-create-events.sql
+  - include:
+      file: db/changelog/002-create-alert-rules.sql

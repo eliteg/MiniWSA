@@ -89,6 +89,26 @@ parsed at all has no event to point to, so `invalidEvents` is empty and the reas
 Required fields: `eventId`, `timestamp`, `configId`, `clientIp`, `path`, `rule.severity`,
 `rule.category`, `action`. All other fields are optional.
 
+## Storage choice
+
+**PostgreSQL 16 + JdbcTemplate** — no ORM (Hibernate/JPA).
+
+The hard queries here are analytical: `GROUP BY category`, top-N attackers, time-range
+aggregates. ORMs are designed for object persistence, not aggregations — you end up dropping to
+raw SQL anyway, so they add a layer without paying off. JdbcTemplate keeps the SQL explicit and
+readable; every query is exactly what runs on the database.
+
+**Why not an ORM:**
+- Analytical queries (GROUP BY, ORDER BY count, LIMIT 10) are most clearly expressed in SQL.
+- No entity-mapping layer means no impedance mismatch or N+1 surprises.
+- The `EventStore` interface is the seam: swapping the implementation for a columnar engine
+  (ClickHouse, SingleStore) at large scale is a one-class change — the rest of the app is
+  unchanged.
+
+**Scaling path:** Plain Postgres handles millions of events comfortably with the three indexes
+on `(config_id, timestamp)`, `(category, timestamp)`, and `(timestamp DESC)`. Beyond that,
+the `EventStore` abstraction makes a columnar-store migration surgical.
+
 ## Test
 
 ```bash

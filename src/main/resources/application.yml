@@ -9,3 +9,9 @@ spring:
 
 server:
   port: 8080
+
+# Threat-score policy. Weights/bonuses are fixed (on the enums / as constants); the cap is the
+# one tunable knob — override per environment (e.g. k8s env var WSA_SCORING_CAP).
+wsa:
+  scoring:
+    cap: 100

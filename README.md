@@ -71,3 +71,16 @@ Required fields: `eventId`, `timestamp`, `configId`, `clientIp`, `path`, `rule.s
 ```bash
 ./gradlew test
 ```
+
+## Known limitations
+
+- **Repeat-offender bonus under out-of-order delivery.** The "more than 5 events from one IP in
+  10 minutes" bonus is counted with an in-memory sliding window (O(1) per event). Events inside a
+  single ingest request are sorted by `timestamp`, so order within a batch is handled. But an event
+  delivered **significantly out of order across separate requests** — an older event arriving after
+  newer events have already advanced (and aged out) the window — may miss the +15, because the
+  earlier events in its 10-minute window have already been evicted from memory. Counts for in-order
+  and live traffic are exact. Closing this fully would require counting from the database
+  (`SELECT count(*) … WHERE client_ip=? AND timestamp BETWEEN t-10m AND t`) or retaining a grace
+  buffer beyond the window — the accuracy-vs-throughput trade-off, deliberately left as documented
+  rather than built.

@@ -41,3 +41,6 @@ bin/
 
 ### Internal working notes (not for public repo) ###
 docs/spec-review-decisions.md
+
+### Generated demo data ###
+data/

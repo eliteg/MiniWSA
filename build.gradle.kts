@@ -66,9 +66,35 @@ val integrationTest = tasks.register<Test>("integrationTest") {
     environment("DOCKER_API_VERSION", "1.41")
     testLogging {
         events("passed", "skipped", "failed")
+        showStandardStreams = true
     }
 }
 
 tasks.check {
     dependsOn(integrationTest)
+}
+
+tasks.register<JavaExec>("generateData") {
+    group = "demo"
+    description = """
+        Generate random security events (30% attack waves).
+        Options (pass as Gradle properties):
+          -Pcount=N      number of events to generate (default: 10000)
+          -Psend=URL     POST to POST /v1/events/ingest in batches (base URL, e.g. -Psend=http://localhost:8080)
+          -Pbatch=N      batch size when sending (default: 100)
+          -Poutput=FILE  write JSON to a file instead of stdout (e.g. -Poutput=events.json)
+        Examples:
+          ./gradlew generateData -Poutput=events.json
+          ./gradlew generateData -Pcount=500 -Poutput=events.json
+          ./gradlew generateData -Pcount=50000 -Psend=http://localhost:8080
+    """.trimIndent()
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("org.example.miniwsa.generator.DataGenerator")
+
+    val argsList = mutableListOf<String>()
+    argsList += "--count=${project.findProperty("count") ?: 10_000}"
+    argsList += "--batch=${project.findProperty("batch") ?: 100}"
+    project.findProperty("send")?.let   { argsList += "--send=$it" }
+    project.findProperty("output")?.let { argsList += "--output=$it" }
+    args = argsList
 }

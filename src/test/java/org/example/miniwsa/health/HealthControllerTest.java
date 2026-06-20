@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.example.miniwsa.samples.SamplesRepository;
 import org.example.miniwsa.stats.StatsRepository;
 import org.example.miniwsa.storage.EventStore;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -24,6 +25,7 @@ class HealthControllerTest {
 
     @MockBean EventStore eventStore;
     @MockBean StatsRepository statsRepository;
+    @MockBean SamplesRepository samplesRepository;
 
     @LocalServerPort
     private int port;

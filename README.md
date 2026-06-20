@@ -117,6 +117,24 @@ the `EventStore` abstraction makes a columnar-store migration surgical.
 
 ## Known limitations
 
+- **`count(*)` at big-data scale.** `GET /v1/events/samples` runs two queries per request:
+  a `count(*)` to get the total and a `SELECT … LIMIT/OFFSET` for the page. `count(*)` over
+  millions of rows is a full index scan even when filters are applied — it gets expensive as the
+  table grows. Two production mitigations:
+  1. **Approximate count** — use Postgres's `pg_class.reltuples` (updated by autovacuum) for a
+     fast estimate, or `EXPLAIN SELECT count(*)` to read the planner's row estimate. Acceptable
+     when users only need "about N results".
+  2. **Keyset (cursor) pagination** — replace `LIMIT/OFFSET` with
+     `WHERE (timestamp, event_id) < (?, ?) ORDER BY timestamp DESC LIMIT ?`. Eliminates
+     the `count(*)` entirely (response carries `hasMore` instead of `total`); `OFFSET` deep
+     into a large result set also gets slower as it must skip rows, while keyset stays O(log n)
+     at any depth via the index.
+
+  The current implementation mitigates the worst case by **defaulting `from` to the last 24 hours**
+  when no time range is supplied, bounding the scan to recent data.
+
+
+
 - **Repeat-offender bonus under out-of-order delivery.** The "more than 5 events from one IP in
   10 minutes" bonus is counted with an in-memory sliding window (O(1) per event). Events inside a
   single ingest request are sorted by `timestamp`, so order within a batch is handled. But an event

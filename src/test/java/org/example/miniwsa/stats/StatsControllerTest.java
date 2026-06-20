@@ -11,6 +11,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import org.example.miniwsa.samples.SamplesRepository;
 import org.example.miniwsa.storage.EventStore;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -27,6 +28,7 @@ class StatsControllerTest {
 
     @MockBean EventStore eventStore;
     @MockBean StatsRepository statsRepository;
+    @MockBean SamplesRepository samplesRepository;
 
     @Autowired private TestRestTemplate template;
 

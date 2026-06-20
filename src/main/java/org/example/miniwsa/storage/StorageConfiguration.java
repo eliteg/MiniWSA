@@ -1,6 +1,7 @@
 package org.example.miniwsa.storage;
 
 import javax.sql.DataSource;
+import org.example.miniwsa.samples.SamplesRepository;
 import org.example.miniwsa.stats.StatsRepository;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -21,5 +22,11 @@ class StorageConfiguration {
     @ConditionalOnBean(DataSource.class)
     StatsRepository statsRepository(JdbcTemplate jdbc) {
         return new StatsRepository(jdbc);
+    }
+
+    @Bean
+    @ConditionalOnBean(DataSource.class)
+    SamplesRepository samplesRepository(JdbcTemplate jdbc) {
+        return new SamplesRepository(jdbc);
     }
 }

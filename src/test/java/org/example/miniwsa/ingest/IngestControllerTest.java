@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.time.Instant;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.example.miniwsa.samples.SamplesRepository;
 import org.example.miniwsa.stats.StatsRepository;
 import org.example.miniwsa.storage.EventStore;
 import org.junit.jupiter.api.Test;
@@ -29,6 +30,7 @@ class IngestControllerTest {
 
     @MockBean EventStore eventStore;
     @MockBean StatsRepository statsRepository;
+    @MockBean SamplesRepository samplesRepository;
 
     @LocalServerPort
     private int port;

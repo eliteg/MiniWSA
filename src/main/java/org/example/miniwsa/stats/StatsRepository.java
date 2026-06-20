@@ -1,8 +1,8 @@
 package org.example.miniwsa.stats;
 
-import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,34 +31,69 @@ public class StatsRepository {
         Object[] args = configId != null ? new Object[]{configId, tsFrom, tsTo}
                                          : new Object[]{tsFrom, tsTo};
 
-        long total = jdbc.queryForObject(
-                "SELECT count(*) FROM events WHERE " + where, Long.class, args);
-
+        // Query 1: byCategory + byAction + grand total in one scan via GROUPING SETS.
+        // Row shapes:
+        //   category=X, action=null → per-category  (grouping set (category))
+        //   category=null, action=Y → per-action     (grouping set (action))
+        //   category=null, action=null → grand total (grouping set ())
         Map<String, CategoryStat> byCategory = new LinkedHashMap<>();
-        jdbc.query("SELECT category, count(*) AS cnt, round(avg(threat_score)::numeric,1) AS avg_score "
-                + "FROM events WHERE " + where + " GROUP BY category",
-                (RowCallbackHandler) rs -> byCategory.put(rs.getString("category"),
-                        new CategoryStat(rs.getLong("cnt"), rs.getBigDecimal("avg_score"))),
-                args);
+        Map<String, Long>         byAction   = new LinkedHashMap<>();
+        long[]                    totalHolder = {0};
 
-        Map<String, Long> byAction = new LinkedHashMap<>();
-        jdbc.query("SELECT action, count(*) AS cnt FROM events WHERE " + where + " GROUP BY action",
-                (RowCallbackHandler) rs -> byAction.put(rs.getString("action"), rs.getLong("cnt")),
-                args);
-
-        List<AttackerStat> topAttackers = jdbc.query(
-                "SELECT host(client_ip) AS ip, count(*) AS cnt, "
+        jdbc.query(
+                "SELECT category, action, count(*) AS cnt, "
                 + "round(avg(threat_score)::numeric,1) AS avg_score "
-                + "FROM events WHERE " + where + " GROUP BY client_ip ORDER BY cnt DESC LIMIT 10",
-                (rs, i) -> new AttackerStat(
-                        rs.getString("ip"), rs.getLong("cnt"), rs.getBigDecimal("avg_score")),
+                + "FROM events WHERE " + where
+                + " GROUP BY GROUPING SETS ((category), (action), ())",
+                (RowCallbackHandler) rs -> {
+                    String cat = rs.getString("category");
+                    String act = rs.getString("action");
+                    long   cnt = rs.getLong("cnt");
+                    if (cat == null && act == null) {
+                        totalHolder[0] = cnt;
+                    } else if (act == null) {
+                        byCategory.put(cat, new CategoryStat(cnt, rs.getBigDecimal("avg_score")));
+                    } else {
+                        byAction.put(act, cnt);
+                    }
+                },
                 args);
 
-        List<PathStat> topPaths = jdbc.query(
-                "SELECT path, count(*) AS cnt FROM events WHERE " + where
-                + " GROUP BY path ORDER BY cnt DESC LIMIT 10",
-                (rs, i) -> new PathStat(rs.getString("path"), rs.getLong("cnt")),
-                args);
+        long total = totalHolder[0];
+
+        // Query 2: top-10 attackers + top-10 paths in one scan via UNION ALL subqueries.
+        // args duplicated: first copy for the attacker subquery, second for the path subquery.
+        Object[] doubleArgs = configId != null
+                ? new Object[]{configId, tsFrom, tsTo, configId, tsFrom, tsTo}
+                : new Object[]{tsFrom, tsTo, tsFrom, tsTo};
+
+        List<AttackerStat> topAttackers = new ArrayList<>();
+        List<PathStat>     topPaths     = new ArrayList<>();
+
+        jdbc.query(
+                "SELECT * FROM ("
+                + "  SELECT 'attacker' AS kind, host(client_ip) AS key, count(*) AS cnt,"
+                + "         round(avg(threat_score)::numeric,1) AS avg_score"
+                + "  FROM events WHERE " + where
+                + "  GROUP BY client_ip ORDER BY cnt DESC LIMIT 10"
+                + ") a"
+                + " UNION ALL"
+                + " SELECT * FROM ("
+                + "  SELECT 'path' AS kind, path AS key, count(*) AS cnt, NULL::numeric AS avg_score"
+                + "  FROM events WHERE " + where
+                + "  GROUP BY path ORDER BY cnt DESC LIMIT 10"
+                + ") p",
+                (RowCallbackHandler) rs -> {
+                    String kind = rs.getString("kind");
+                    String key  = rs.getString("key");
+                    long   cnt  = rs.getLong("cnt");
+                    if ("attacker".equals(kind)) {
+                        topAttackers.add(new AttackerStat(key, cnt, rs.getBigDecimal("avg_score")));
+                    } else {
+                        topPaths.add(new PathStat(key, cnt));
+                    }
+                },
+                doubleArgs);
 
         return new StatsResponse(total, byCategory, byAction, topAttackers, topPaths);
     }

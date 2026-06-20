@@ -26,6 +26,8 @@ class HealthControllerTest {
     @MockBean EventStore eventStore;
     @MockBean StatsRepository statsRepository;
     @MockBean SamplesRepository samplesRepository;
+    @MockBean org.example.miniwsa.alert.AlertRepository alertRepository;
+    @MockBean org.example.miniwsa.alert.AlertEvaluator alertEvaluator;
 
     @LocalServerPort
     private int port;

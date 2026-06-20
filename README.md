@@ -89,9 +89,30 @@ POST /v1/events/ingest
 GET /v1/events/stats    GET /v1/events/samples
 ```
 
-## Quick demo
+## Quickest demo (no Docker needed)
 
-**1. Start the stack**
+Run the end-to-end integration test — it spins up a real Postgres via Testcontainers, runs the
+full pipeline, and prints every raw API response to the console:
+
+```bash
+./gradlew integrationTest --tests "org.example.miniwsa.enrichment.RepeatOffenderIntegrationTest" --rerun
+```
+
+What you'll see in the output:
+- **Ingest** — 10 wave events from the same IP + 1 background event → `201 Created`
+- **Stats** — top attacker at `avgThreatScore=27.5` (repeat-offender +15 fired on events 6–10)
+- **Samples** — individual events with `threatScore=35` for the wave and `threatScore=20` for background
+- **Alerts** — a BOT rule with `threshold=5` firing because `currentCount=11`
+
+To run all integration tests:
+
+```bash
+./gradlew integrationTest --rerun
+```
+
+## Quick demo (full stack)
+
+**1. Start the stack** (requires Docker)
 ```bash
 docker compose up --build
 ```
@@ -198,6 +219,58 @@ Returns paginated individual event records.
 
 ```bash
 curl -s "localhost:8080/v1/events/samples?category=INJECTION&limit=10" | python3 -m json.tool
+```
+
+### `POST /v1/alerts/define`
+
+Defines an alert rule: fire when the count of events in a given category exceeds `threshold`
+within the last `windowMinutes` minutes.
+
+```bash
+curl -X POST localhost:8080/v1/alerts/define -H 'Content-Type: application/json' -d '{
+  "category": "BOT",
+  "threshold": 5,
+  "windowMinutes": 10
+}'
+```
+
+Required fields: `category` (`INJECTION`, `XSS`, `BOT`, `BRUTE_FORCE`, `SCANNER`, `OTHER`),
+`threshold` (≥ 1), `windowMinutes` (≥ 1).
+
+**`201 Created`**
+```json
+{ "id": 1, "category": "BOT", "threshold": 5, "windowMinutes": 10, "createdAt": "2026-06-20T08:00:00Z" }
+```
+
+### `GET /v1/alerts/evaluate`
+
+Evaluates all defined rules against current event counts and returns their firing status.
+
+```bash
+curl -s localhost:8080/v1/alerts/evaluate | python3 -m json.tool
+```
+
+```json
+[
+  {
+    "ruleId": 1,
+    "category": "BOT",
+    "threshold": 5,
+    "windowMinutes": 10,
+    "currentCount": 11,
+    "firing": true
+  }
+]
+```
+
+`firing` is `true` when `currentCount > threshold`. Implemented as a single LEFT JOIN across all
+rules — one round-trip regardless of how many rules are defined.
+
+### `GET /health`
+
+```bash
+curl localhost:8080/health
+# {"status":"UP"}
 ```
 
 ### Data generator

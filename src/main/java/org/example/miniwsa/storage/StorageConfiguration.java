@@ -1,6 +1,8 @@
 package org.example.miniwsa.storage;
 
 import javax.sql.DataSource;
+import org.example.miniwsa.alert.AlertEvaluator;
+import org.example.miniwsa.alert.AlertRepository;
 import org.example.miniwsa.samples.SamplesRepository;
 import org.example.miniwsa.stats.StatsRepository;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -28,5 +30,17 @@ class StorageConfiguration {
     @ConditionalOnBean(DataSource.class)
     SamplesRepository samplesRepository(JdbcTemplate jdbc) {
         return new SamplesRepository(jdbc);
+    }
+
+    @Bean
+    @ConditionalOnBean(DataSource.class)
+    AlertRepository alertRepository(JdbcTemplate jdbc) {
+        return new AlertRepository(jdbc);
+    }
+
+    @Bean
+    @ConditionalOnBean(DataSource.class)
+    AlertEvaluator alertEvaluator(JdbcTemplate jdbc) {
+        return new AlertEvaluator(jdbc);
     }
 }

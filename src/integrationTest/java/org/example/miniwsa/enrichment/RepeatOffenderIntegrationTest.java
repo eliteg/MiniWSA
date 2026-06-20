@@ -11,7 +11,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import org.example.miniwsa.alert.AlertResult;
 import org.example.miniwsa.event.Category;
+import org.example.miniwsa.samples.SampledEvent;
 import org.example.miniwsa.samples.SamplesResponse;
 import org.example.miniwsa.stats.StatsResponse;
 import org.junit.jupiter.api.BeforeEach;
@@ -38,186 +40,254 @@ class RepeatOffenderIntegrationTest {
             .registerModule(new JavaTimeModule())
             .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
             .enable(SerializationFeature.INDENT_OUTPUT);
+    private static final String RUN_ID = java.time.LocalDateTime.now()
+            .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
 
     @Container
     @ServiceConnection
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
 
-    @Autowired private TestRestTemplate template;
+    @Autowired private TestRestTemplate http;
     @Autowired private JdbcTemplate jdbc;
 
     @BeforeEach
-    void clearEvents() {
+    void cleanDb() {
         jdbc.update("DELETE FROM events");
+        jdbc.update("DELETE FROM alert_rules");
     }
 
     /**
-     * Sends 10 events from the same IP within 10 minutes plus 1 background event,
-     * all in a single POST so the enrichment service sorts by timestamp and applies
-     * the repeat-offender bonus correctly.
+     * Scenario 1 — Wave / burst detection
      *
-     * Scoring for MEDIUM + MONITOR, no sensitive path:
-     *   base = 20 + 0 = 20
-     *   events 1-5  → 20  (window not yet exceeded)
-     *   events 6-10 → 35  (20 + 15 repeat-offender bonus)
-     *   wave avg    = (5×20 + 5×35) / 10 = 27.5
-     *   bg avg      = 20.0 (single event, no bonus)
+     * Ingests 10 BOT events from 5.5.5.5 (wave) + 1 background event from 9.8.7.6.
+     * Events are 1 minute apart, starting 10 minutes ago.
+     *
+     * Expected scoring (MEDIUM + MONITOR, no sensitive path):
+     *   base score       = 20
+     *   events 1-5  (5.5.5.5) → 20   (repeat-offender window not yet exceeded)
+     *   events 6-10 (5.5.5.5) → 35   (20 + 15 repeat-offender bonus)
+     *   wave avg         = (5×20 + 5×35) / 10 = 27.5
+     *   background avg   = 20.0
      */
     @Test
-    void waveIpGetsRepeatOffenderBonusVisibleInStats() throws Exception {
-        Instant base   = Instant.now().minusSeconds(600);
-        String  waveIp = "5.5.5.5";
-        String  bgIp   = "9.8.7.6";
+    void scenario1_waveBurstDetection() throws Exception {
+        String waveIp = "5.5.5.5";
+        String bgIp   = "9.8.7.6";
+        Instant base  = Instant.now().minusSeconds(600);
+        List<String> savedFiles = new ArrayList<>();
 
+        log.info("{}", title("SCENARIO 1 — Wave/burst detection: 10 events from " + waveIp));
+
+        // ── ingest ───────────────────────────────────────────────────────────
         List<Map<String, Object>> events = new ArrayList<>();
         for (int i = 0; i < 10; i++) {
-            events.add(buildEvent("wave-" + i, waveIp, base.plusSeconds(i * 60L)));
+            events.add(buildBotEvent("wave-" + i, waveIp, base.plusSeconds(i * 60L)));
         }
-        events.add(buildEvent("bg-0", bgIp, base));
+        events.add(buildBotEvent("bg-0", bgIp, base));
 
-        ResponseEntity<String> ingest = template.postForEntity(
-                "/v1/events/ingest", events, String.class);
+        log.info("  → POST /v1/events/ingest  [11 BOT events: 10 wave + 1 background]");
+        ResponseEntity<String> ingest = http.postForEntity("/v1/events/ingest", events, String.class);
         assertThat(ingest.getStatusCode()).isEqualTo(HttpStatus.CREATED);
 
-        // ── stats API ────────────────────────────────────────────────────────
-        String rawStats = template.getForEntity("/v1/events/stats", String.class).getBody();
-        StatsResponse stats = template.getForEntity("/v1/events/stats", StatsResponse.class).getBody();
+        log.info("{}", title("POST /v1/events/ingest"));
+        log.info("{}", subtitle("Response", PRETTY.readTree(ingest.getBody()).toPrettyString()));
 
-        log.info("\n=== Stats raw response ===\n{}\n=========================",
-                PRETTY.readTree(rawStats).toPrettyString());
+        // ── stats ─────────────────────────────────────────────────────────────
+        log.info("{}", title("GET  /v1/events/stats"));
+        String rawStats = http.getForEntity("/v1/events/stats", String.class).getBody();
+        StatsResponse stats = PRETTY.readValue(rawStats, StatsResponse.class);
+        savedFiles.add(save("scenario-1", "stats", rawStats));
 
-        StringBuilder statsSummary = new StringBuilder("\n=== Stats summary ===\n");
-        statsSummary.append(String.format("totalEvents: %d%n", stats.totalEvents()));
-        statsSummary.append("topAttackers:\n");
-        stats.topAttackers().forEach(a -> statsSummary.append(
-                String.format("  %-15s  count=%-3d  avgThreatScore=%s%n",
-                        a.clientIp(), a.count(), a.avgThreatScore())));
-        statsSummary.append("byCategory:\n");
-        stats.byCategory().forEach((cat, s) -> statsSummary.append(
-                String.format("  %-20s  count=%-3d  avgThreatScore=%s%n",
-                        cat, s.count(), s.avgThreatScore())));
-        statsSummary.append("====================");
-        log.info("{}", statsSummary);
+        log.info("{}", subtitle("Response", PRETTY.readTree(rawStats).toPrettyString()));
 
-        StatsResponse.AttackerStat waveAttacker = stats.topAttackers().get(0);
-        assertThat(waveAttacker.clientIp()).isEqualTo(waveIp);
-        assertThat(waveAttacker.count()).isEqualTo(10);
-        assertThat(waveAttacker.avgThreatScore()).isGreaterThan(new BigDecimal("20.0"));
+        assertThat(stats.totalEvents()).isEqualTo(11);
+        StatsResponse.AttackerStat wave = stats.topAttackers().get(0);
+        assertThat(wave.clientIp()).isEqualTo(waveIp);
+        assertThat(wave.count()).isEqualTo(10);
+        assertThat(wave.avgThreatScore()).isGreaterThan(new BigDecimal("20.0"));
+        StatsResponse.AttackerStat bg = stats.topAttackers().stream()
+                .filter(a -> bgIp.equals(a.clientIp())).findFirst().orElseThrow();
+        assertThat(bg.avgThreatScore()).isEqualByComparingTo(new BigDecimal("20.0"));
 
-        StatsResponse.AttackerStat bgAttacker = stats.topAttackers().stream()
-                .filter(a -> bgIp.equals(a.clientIp()))
-                .findFirst().orElseThrow();
-        assertThat(bgAttacker.avgThreatScore()).isEqualByComparingTo(new BigDecimal("20.0"));
+        // ── samples — paginated (limit=2) ─────────────────────────────────────
+        log.info("{}", title(
+                "GET /v1/events/samples?category={category}&limit={limit}&offset={offset}&from={ISO8601}"));
 
-        // ── samples API ──────────────────────────────────────────────────────
-        String samplesUrl = "/v1/events/samples?category=BOT&limit=20&from=2000-01-01T00:00:00Z";
-        String rawSamples = template.getForEntity(samplesUrl, String.class).getBody();
-        SamplesResponse samples = template.getForEntity(samplesUrl, SamplesResponse.class).getBody();
+        int limit = 2;
+        List<SampledEvent> allSampled = new ArrayList<>();
+        List<String> pageUrls = new ArrayList<>();
+        int offset = 0;
+        long totalEvents = 0;
+        while (true) {
+            String url = "/v1/events/samples?category=BOT&limit=" + limit
+                    + "&offset=" + offset + "&from=2000-01-01T00:00:00Z";
+            pageUrls.add(url);
+            String raw = http.getForEntity(url, String.class).getBody();
+            SamplesResponse page = PRETTY.readValue(raw, SamplesResponse.class);
+            if (offset == 0) totalEvents = page.total();
+            savedFiles.add(save("scenario-1", "samples-p" + pageUrls.size(), raw));
+            allSampled.addAll(page.events());
+            if (page.events().size() < limit) break;
+            offset += limit;
+        }
 
-        log.info("\n=== Samples raw response ===\n{}\n===========================",
-                PRETTY.readTree(rawSamples).toPrettyString());
+        StringBuilder pageBlock = new StringBuilder();
+        for (int i = 0; i < pageUrls.size(); i++) {
+            pageBlock.append(String.format("  page %-2d → GET %s%n", i + 1, pageUrls.get(i)));
+        }
+        log.info("{}", subtitle(
+                pageUrls.size() + " pages  (limit=" + limit + ", total=" + totalEvents + ")",
+                pageBlock.toString().stripTrailing()));
 
-        StringBuilder samplesSummary = new StringBuilder("\n=== Samples summary ===\n");
-        samplesSummary.append(String.format("total: %d%n", samples.total()));
-        samples.events().forEach(e -> samplesSummary.append(
-                String.format("  %-50s  %-15s  severity=%-8s  action=%-8s  threatScore=%d%n",
-                        e.eventId(), e.clientIp(), e.severity(), e.action(), e.threatScore())));
-        samplesSummary.append("======================");
-        log.info("{}", samplesSummary);
+        assertThat(totalEvents).isEqualTo(11);
+        assertThat(allSampled.stream().filter(e -> e.threatScore() > 20).count()).isEqualTo(5);
 
-        assertThat(samples.total()).isEqualTo(11);
-        long bonusCount = samples.events().stream()
-                .filter(e -> e.threatScore() > 20)
-                .count();
-        assertThat(bonusCount).isEqualTo(5);
+        // ── alerts ────────────────────────────────────────────────────────────
+        log.info("{}", title("POST /v1/alerts/define  +  GET /v1/alerts/evaluate"));
+
+        log.info("  → POST /v1/alerts/define  [category=BOT  threshold=5  windowMinutes=20]");
+        http.postForEntity("/v1/alerts/define",
+                Map.of("category", "BOT", "threshold", 5, "windowMinutes", 20),
+                String.class);
+
+        log.info("  → GET  /v1/alerts/evaluate");
+        String rawAlerts = http.getForEntity("/v1/alerts/evaluate", String.class).getBody();
+        List<AlertResult> alerts = PRETTY.readValue(rawAlerts,
+                PRETTY.getTypeFactory().constructCollectionType(List.class, AlertResult.class));
+        savedFiles.add(save("scenario-1", "alerts", rawAlerts));
+
+        log.info("{}", subtitle("Response", PRETTY.readTree(rawAlerts).toPrettyString()));
+
+        assertThat(alerts).hasSize(1);
+        assertThat(alerts.get(0).category()).isEqualTo("BOT");
+        assertThat(alerts.get(0).currentCount()).isEqualTo(11);
+        assertThat(alerts.get(0).firing()).isTrue();
+
+        log.info("{}", subtitle("Saved files", String.join("\n", savedFiles)));
     }
 
+    /**
+     * Scenario 2 — Invalid batch is fully rejected (all-or-nothing)
+     *
+     * Phase 1: ingest 2 valid events — verify they are stored.
+     * Phase 2: ingest a batch of 3 where one is missing 'action' — expect 400,
+     *          verify nothing is stored (stats and samples remain empty).
+     */
     @Test
-    void batchWithOneInvalidEventIsFullyRejected() throws Exception {
+    void scenario2_invalidBatchIsFullyRejected() throws Exception {
         Instant base = Instant.now().minusSeconds(300);
+        List<String> savedFiles = new ArrayList<>();
 
-        // ── happy flow first ─────────────────────────────────────────────────
-        List<Map<String, Object>> validBatch = List.of(
-                buildEvent("valid-0", "1.1.1.1", base),
-                buildEvent("valid-1", "1.1.1.1", base.plusSeconds(60)));
+        // ── phase 1: valid batch ──────────────────────────────────────────────
+        log.info("{}", title("SCENARIO 2 — Phase 1: valid batch (expect 201)"));
 
-        ResponseEntity<String> happy = template.postForEntity(
-                "/v1/events/ingest", validBatch, String.class);
-        log.info("\n=== Happy flow ingest response (expect 201) ===\n{}\n===============================================",
-                PRETTY.readTree(happy.getBody()).toPrettyString());
-        assertThat(happy.getStatusCode().value()).isEqualTo(201);
+        List<Map<String, Object>> valid = List.of(
+                buildBotEvent("v0", "1.1.1.1", base),
+                buildBotEvent("v1", "1.1.1.1", base.plusSeconds(60)));
 
-        log.info("\n=== Stats after valid batch ===\n{}\n==============================",
-                PRETTY.readTree(template.getForEntity("/v1/events/stats", String.class).getBody()).toPrettyString());
-        log.info("\n=== Samples after valid batch ===\n{}\n================================",
-                PRETTY.readTree(template.getForEntity(
-                        "/v1/events/samples?from=2000-01-01T00:00:00Z", String.class).getBody()).toPrettyString());
+        log.info("  → POST /v1/events/ingest  [2 valid BOT events]");
+        ResponseEntity<String> ok = http.postForEntity("/v1/events/ingest", valid, String.class);
+        assertThat(ok.getStatusCode().value()).isEqualTo(201);
+        log.info("{}", title("POST /v1/events/ingest"));
+        log.info("{}", subtitle("Response", PRETTY.readTree(ok.getBody()).toPrettyString()));
 
-        StatsResponse statsAfterValid = template.getForEntity("/v1/events/stats", StatsResponse.class).getBody();
-        assertThat(statsAfterValid.totalEvents()).isEqualTo(2);
+        log.info("{}", title("GET  /v1/events/stats"));
+        String rawStats1 = http.getForEntity("/v1/events/stats", String.class).getBody();
+        savedFiles.add(save("scenario-2/phase-1", "stats", rawStats1));
+        log.info("{}", subtitle("Response", PRETTY.readTree(rawStats1).toPrettyString()));
+        assertThat(PRETTY.readValue(rawStats1, StatsResponse.class).totalEvents()).isEqualTo(2);
 
-        // ── now send batch with one invalid event ────────────────────────────
-        log.info("\n{}", "=".repeat(80));
-        log.info("PHASE 2 — invalid batch (one event missing 'action') — all-or-nothing rejection");
-        log.info("{}\n", "=".repeat(80));
+        log.info("{}", title("GET  /v1/events/samples?from={ISO8601}"));
+        String rawSamples1 = http.getForEntity(
+                "/v1/events/samples?from=2000-01-01T00:00:00Z", String.class).getBody();
+        savedFiles.add(save("scenario-2/phase-1", "samples", rawSamples1));
+        log.info("{}", subtitle("Response", PRETTY.readTree(rawSamples1).toPrettyString()));
+        assertThat(PRETTY.readValue(rawSamples1, SamplesResponse.class).total()).isEqualTo(2);
+
+        // ── phase 2: invalid batch ────────────────────────────────────────────
         jdbc.update("DELETE FROM events");
+        log.info("{}", title("SCENARIO 2 — Phase 2: invalid batch (expect 400, nothing stored)"));
 
-        List<Map<String, Object>> invalidBatch = new ArrayList<>();
-        invalidBatch.add(buildEvent("valid-2", "1.1.1.1", base));
-        invalidBatch.add(buildEvent("valid-3", "1.1.1.1", base.plusSeconds(60)));
-        invalidBatch.add(Map.of(
-                "eventId",   "repeat-test-bad-" + UUID.randomUUID(),
+        List<Map<String, Object>> invalid = new ArrayList<>();
+        invalid.add(buildBotEvent("v2", "1.1.1.1", base));
+        invalid.add(buildBotEvent("v3", "1.1.1.1", base.plusSeconds(60)));
+        invalid.add(Map.of(                                    // missing 'action'
+                "eventId",   "bad-" + UUID.randomUUID(),
                 "timestamp", base.plusSeconds(120).toString(),
                 "configId",  1,
                 "clientIp",  "1.1.1.1",
                 "path",      "/api/v1/data",
-                "rule",      Map.of("severity", "MEDIUM", "category", "BOT")
-                // missing "action" — invalidates the whole batch
-        ));
+                "rule",      Map.of("severity", "MEDIUM", "category", "BOT")));
 
-        ResponseEntity<String> rejected = template.postForEntity(
-                "/v1/events/ingest", invalidBatch, String.class);
-        log.info("\n=== Invalid batch ingest response (expect 400) ===\n{}\n=================================================",
-                PRETTY.readTree(rejected.getBody()).toPrettyString());
-        assertThat(rejected.getStatusCode().value()).isEqualTo(400);
+        log.info("  → POST /v1/events/ingest  [3 events, index 2 missing 'action']");
+        ResponseEntity<String> bad = http.postForEntity("/v1/events/ingest", invalid, String.class);
+        assertThat(bad.getStatusCode().value()).isEqualTo(400);
+        log.info("{}", title("POST /v1/events/ingest"));
+        log.info("{}", subtitle("Response", PRETTY.readTree(bad.getBody()).toPrettyString()));
 
-        log.info("\n=== Stats after rejected batch (expect empty) ===\n{}\n================================================",
-                PRETTY.readTree(template.getForEntity("/v1/events/stats", String.class).getBody()).toPrettyString());
-        log.info("\n=== Samples after rejected batch (expect empty) ===\n{}\n==================================================",
-                PRETTY.readTree(template.getForEntity(
-                        "/v1/events/samples?from=2000-01-01T00:00:00Z", String.class).getBody()).toPrettyString());
+        log.info("{}", title("GET  /v1/events/stats  [expect empty]"));
+        String rawStats2 = http.getForEntity("/v1/events/stats", String.class).getBody();
+        savedFiles.add(save("scenario-2/phase-2", "stats", rawStats2));
+        log.info("{}", subtitle("Response", PRETTY.readTree(rawStats2).toPrettyString()));
 
-        StatsResponse statsAfterRejected = template.getForEntity("/v1/events/stats", StatsResponse.class).getBody();
-        assertThat(statsAfterRejected.totalEvents()).isZero();
-        assertThat(statsAfterRejected.topAttackers()).isEmpty();
-        SamplesResponse samplesAfterRejected = template.getForEntity(
-                "/v1/events/samples?from=2000-01-01T00:00:00Z", SamplesResponse.class).getBody();
-        assertThat(samplesAfterRejected.total()).isZero();
-        assertThat(samplesAfterRejected.events()).isEmpty();
+        log.info("{}", title("GET  /v1/events/samples?from={ISO8601}  [expect empty]"));
+        String rawSamples2 = http.getForEntity(
+                "/v1/events/samples?from=2000-01-01T00:00:00Z", String.class).getBody();
+        savedFiles.add(save("scenario-2/phase-2", "samples", rawSamples2));
+        log.info("{}", subtitle("Response", PRETTY.readTree(rawSamples2).toPrettyString()));
+
+        StatsResponse statsAfter = PRETTY.readValue(rawStats2, StatsResponse.class);
+        SamplesResponse samplesAfter = PRETTY.readValue(rawSamples2, SamplesResponse.class);
+        assertThat(statsAfter.totalEvents()).isZero();
+        assertThat(statsAfter.topAttackers()).isEmpty();
+        assertThat(samplesAfter.total()).isZero();
+        assertThat(samplesAfter.events()).isEmpty();
+
+        log.info("{}", subtitle("Saved files", String.join("\n", savedFiles)));
     }
 
-    private static Map<String, Object> buildEvent(String suffix, String ip, Instant ts) {
-        Map<String, Object> event = new java.util.LinkedHashMap<>();
-        event.put("eventId",      "repeat-test-" + suffix + "-" + UUID.randomUUID());
-        event.put("timestamp",    ts.toString());
-        event.put("configId",     1);
-        event.put("policyId",     "policy-1234");
-        event.put("clientIp",     ip);
-        event.put("hostname",     "api.example.com");
-        event.put("path",         "/api/v1/data");
-        event.put("method",       "POST");
-        event.put("statusCode",   200);
-        event.put("userAgent",    "curl/7.68.0");
-        event.put("requestSize",  1024);
-        event.put("responseSize", 256);
-        event.put("geoLocation",  Map.of("country", "CN", "city", "Beijing"));
-        event.put("rule", Map.of(
+    // ── helpers ───────────────────────────────────────────────────────────────
+
+    private static String title(String text) {
+        String bar = "*".repeat(text.length() + 8);
+        return "\n" + bar + "\n    " + text + "\n" + bar;
+    }
+
+    private static String subtitle(String label, String body) {
+        String bar = "=".repeat(label.length() + 8);
+        return "\n  " + label + "\n" + bar + "\n" + body + "\n" + bar;
+    }
+
+    private static String save(String scenario, String name, String rawJson) throws Exception {
+        java.nio.file.Path dir = java.nio.file.Path.of("data/test-runs", RUN_ID, scenario);
+        java.nio.file.Files.createDirectories(dir);
+        java.nio.file.Path file = dir.resolve(name + ".json");
+        java.nio.file.Files.writeString(file, PRETTY.readTree(rawJson).toPrettyString());
+        return file.toString();
+    }
+
+    private static Map<String, Object> buildBotEvent(String suffix, String ip, Instant ts) {
+        Map<String, Object> e = new java.util.LinkedHashMap<>();
+        e.put("eventId",      "test-" + suffix + "-" + UUID.randomUUID());
+        e.put("timestamp",    ts.toString());
+        e.put("configId",     1);
+        e.put("policyId",     "policy-1234");
+        e.put("clientIp",     ip);
+        e.put("hostname",     "api.example.com");
+        e.put("path",         "/api/v1/data");
+        e.put("method",       "POST");
+        e.put("statusCode",   200);
+        e.put("userAgent",    "curl/7.68.0");
+        e.put("requestSize",  1024);
+        e.put("responseSize", 256);
+        e.put("geoLocation",  Map.of("country", "CN", "city", "Beijing"));
+        e.put("rule", Map.of(
                 "id",       Category.BOT.ruleId,
                 "name",     Category.BOT.ruleName,
                 "message",  Category.BOT.ruleMessage,
                 "severity", "MEDIUM",
                 "category", "BOT"));
-        event.put("action", "MONITOR");
-        return event;
+        e.put("action", "MONITOR");
+        return e;
     }
 }

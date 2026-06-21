@@ -39,8 +39,17 @@ class InMemoryRepeatOffenderDetectorTest {
     }
 
     @Test
+    void exactlyTenMinuteWindowExcludesEarliestMinute() {
+        // 5 events at minute 0; 6th at minute 10 → window [1, 10] excludes minute 0 → no bonus
+        for (int i = 1; i <= 5; i++) {
+            assertThat(detector.isRepeatOffender(event("ip1", "e" + i, T0))).isFalse();
+        }
+        assertThat(detector.isRepeatOffender(event("ip1", "e6", T0.plusSeconds(10 * 60)))).isFalse();
+    }
+
+    @Test
     void eventsOlderThanWindowDoNotCount() {
-        // 5 events at minutes 1–5; a 6th event at minute 18 falls outside their window [8, 18]
+        // 5 events at minutes 1–5; a 6th event at minute 18 falls outside their window [9, 18]
         for (int i = 1; i <= 5; i++) {
             detector.isRepeatOffender(event("ip1", "e" + i, T0.plusSeconds(i * 60L)));
         }
@@ -75,15 +84,6 @@ class InMemoryRepeatOffenderDetectorTest {
         }
         // late event at T0+2min: window is [T0-8min, T0+2min] — the 5 future events are outside
         assertThat(detector.isRepeatOffender(event("ip1", "e-late", T0.plusSeconds(2 * 60)))).isFalse();
-    }
-
-    @Test
-    void resumeBeyondWindowDoesNotTriggerBonus() {
-        for (int i = 1; i <= 5; i++) {
-            detector.isRepeatOffender(event("ip1", "e" + i, T0.plusSeconds(i * 60L)));
-        }
-        // 6th event at minute 18: first 5 (minutes 1–5) are outside window [8, 18]
-        assertThat(detector.isRepeatOffender(event("ip1", "e6", T0.plusSeconds(18 * 60)))).isFalse();
     }
 
     @Test

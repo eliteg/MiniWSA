@@ -4,7 +4,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.validation.Validator;
 import java.time.Instant;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.IntStream;
@@ -50,9 +49,7 @@ class AsyncIngestController {
         }
 
         Instant receivedAt = Instant.now();
-        events.stream()
-                .sorted(Comparator.comparing(Event::timestamp).thenComparing(Event::eventId))
-                .forEach(event -> publish(event, receivedAt));
+        events.forEach(event -> publish(event, receivedAt));
         return ResponseEntity.accepted().body(new IngestAccepted(events.size(), receivedAt));
     }
 

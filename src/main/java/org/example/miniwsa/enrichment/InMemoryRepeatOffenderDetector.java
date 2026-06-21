@@ -15,15 +15,18 @@ import org.springframework.stereotype.Component;
  * minutes of the current event's timestamp.
  *
  * <p><b>Grouped by minute for O(1).</b> Each IP keeps its recent event ids grouped by the minute
- * they occurred; counting sums the ~11 minutes covering the window, and eviction is minute-index
+ * they occurred; counting sums exactly 10 minute buckets covering the window, and eviction is minute-index
  * arithmetic — never a scan over events.
  *
  * <p><b>Event-time, never wall-clock.</b> Both the count window and eviction are anchored on the
  * event's own {@code timestamp}, so replayed/backdated data counts correctly.
  *
  * <p><b>Out-of-order safety.</b> Eviction is based on the furthest timestamp seen for each IP
- * (not the current event's timestamp), minus the window, minus a lateness tolerance. This ensures
- * a far-future event does not prematurely evict entries that a still-pending late event would need.
+ * (not the current event's timestamp), minus the window, minus {@link #LATENESS_TOLERANCE_MINUTES}.
+ * This ensures a far-future event does not prematurely evict entries that a still-pending late event
+ * would need. The tolerance is {@value #LATENESS_TOLERANCE_MINUTES} minutes: events arriving more
+ * than that behind the furthest-seen timestamp for their IP may lose historical context and be
+ * under-counted.
  *
  * <p><b>Memory.</b> IPs that stop sending events are never removed from the map — the map grows
  * unboundedly with distinct IPs seen. Production fix: replace with a Redis-backed implementation
@@ -47,7 +50,7 @@ public class InMemoryRepeatOffenderDetector implements RepeatOffenderDetector {
             minutes.add(minute, event.eventId());
             long evictBefore = minutes.maxMinute() - WINDOW_MINUTES - LATENESS_TOLERANCE_MINUTES;
             minutes.evictBefore(evictBefore);
-            result[0] = minutes.countBetween(minute - WINDOW_MINUTES, minute) > THRESHOLD;
+            result[0] = minutes.countBetween(minute - WINDOW_MINUTES + 1, minute) > THRESHOLD;
             return minutes;
         });
         return result[0];

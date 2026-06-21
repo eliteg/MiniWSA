@@ -20,13 +20,13 @@ public class EnrichmentService {
 
     private final AttackTypeClassifier classifier;
     private final ThreatScorer scorer;
-    private final RepeatOffenderWindow window;
+    private final RepeatOffenderDetector detector;
 
     public EnrichmentService(AttackTypeClassifier classifier, ThreatScorer scorer,
-                             RepeatOffenderWindow window) {
+                             RepeatOffenderDetector detector) {
         this.classifier = classifier;
         this.scorer = scorer;
-        this.window = window;
+        this.detector = detector;
     }
 
     /** Enriches a batch in event-time order; the returned list is in that sorted order. */
@@ -39,8 +39,7 @@ public class EnrichmentService {
 
     private EnrichedEvent enrichOne(Event event, Instant receivedAt) {
         String attackType = classifier.classify(event.rule().category());
-        int count = window.recordAndCount(event);
-        boolean repeatOffender = count > RepeatOffenderWindow.THRESHOLD;
+        boolean repeatOffender = detector.isRepeatOffender(event);
         int threatScore = scorer.score(event, repeatOffender);
         return new EnrichedEvent(event, receivedAt, attackType, threatScore);
     }

@@ -399,19 +399,38 @@ readable; every query is exactly what runs on the database.
 The `EventStore` interface is the seam: swapping the implementation for a columnar engine
 (ClickHouse, SingleStore) at large scale is a one-class change — the rest of the app is unchanged.
 
+## What I would improve with more time
+
+- **Repeat-offender window: replace with Redis.** The current implementation is in-memory. Two problems: (1) the map grows forever — IPs that stop attacking are never removed because there is no scheduled eviction; (2) if the app restarts, the window is lost and a repeat offender resets to zero. Redis solves both: each IP's data lives in a sorted set with a native TTL, so keys expire automatically and data survives restarts. The `RepeatOffenderDetector` interface is already the seam for this swap.
+
+- **Kafka batch consumer.** The consumer currently processes one event at a time. A batch listener would consume a whole poll batch together, sort it by timestamp before enrichment, and write to the database in a single bulk insert — better throughput and no need for the producer-side sort workaround.
+
+- **Metrics and observability.** No Micrometer metrics. Missing: Kafka consumer lag, DLQ message count, enrichment latency histogram, per-category event rate.
+
+- **Alert evaluation push.** Currently pull-based — you call `GET /alerts/evaluate`. Should fire on a schedule or on each ingest and send a webhook or notification.
+
+- **SingleStore for analytical queries.** PostgreSQL stores data row by row — every row is one event with all its columns packed together. This is efficient for fetching a single event by ID, but slow for analytical queries like "sum threat scores by category across 10 million events", because Postgres has to read every column of every row even though the query only touches two columns. A columnar store like SingleStore stores each column separately. The query "group by category" only reads the category and threat_score columns — skipping everything else. For the stats and alerts endpoints this is the bottleneck at scale. The `EventStore` interface is already the seam: swapping the implementation is a one-class change with no impact on the rest of the app.
+
+## What was challenging
+
+### The sliding window and the out-of-order bug
+
+The repeat-offender rule is: if the same IP sends more than 5 events within any 10-minute window, add +15 to the threat score.
+
+The window is kept in memory, grouped by minute. For every event that arrives, we clean up old minutes that can no longer affect the count — this keeps memory bounded.
+
+The bug: the cleanup was anchored to the **current event's timestamp**. So when an event at minute 12 arrived, we deleted everything before minute 2 (12 minus 10). That sounds right — minute 2 is outside a 10-minute window ending at minute 12.
+
+The problem is that events do not always arrive in order. A later event at minute 6 might arrive after the minute-12 event. Minute 6's window is minutes -4 to 6 — and minute 1 and 2 **are** inside that range. But they were already deleted by the minute-12 event.
+
+The fix: anchor eviction to the **furthest timestamp seen for that IP**, not the current event, and add a grace buffer of 5 minutes. When minute 12 arrives, we now delete only before minute -3 (12 minus 10 minus 5). Minute 1 and 2 survive, and the late minute-6 event can count them correctly.
+
 ## Known limitations
 
-- **`count(*)` at big-data scale.** `GET /v1/events/samples` runs two queries per request:
-  a `count(*)` to get the total and a `SELECT … LIMIT/OFFSET` for the page. `count(*)` over
-  millions of rows is a full index scan even when filters are applied. Two production mitigations:
-  1. **Approximate count** — use Postgres's `pg_class.reltuples` for a fast estimate.
-  2. **Keyset pagination** — replace `LIMIT/OFFSET` with `WHERE (timestamp, event_id) < (?, ?)`
-     to eliminate `count(*)` entirely and keep pagination O(log n) at any depth.
+- **Pagination is slow at large scale.** The samples endpoint runs `count(*)` on every request to get the total number of results. On millions of rows this is expensive — it has to scan the whole table. For now the `from` filter defaults to the last 24 hours, which keeps the scan small. A proper fix is keyset pagination: instead of `LIMIT/OFFSET`, use `WHERE (timestamp, event_id) < (last seen values)` so each page jump is fast regardless of how deep you are.
 
-  Current mitigation: `from` defaults to the last 24 hours, bounding the scan to recent data.
+- **The repeat-offender window is in-memory and grows forever.** Every IP that ever sends an event stays in the map — there is no cleanup. Production fix: replace with Redis, where each IP's data expires automatically.
 
-- **Repeat-offender bonus under out-of-order delivery.** The sliding window is in-memory. Events
-  inside a single ingest request are sorted by timestamp, so order within a batch is handled. But
-  an event arriving significantly out of order across separate requests may miss the +15 bonus.
-  Closing this fully would require counting from the database or retaining a grace buffer —
-  deliberately left as documented rather than built.
+- **No warm restart.** If the app restarts, the in-memory window is gone. An IP that sent 5 events just before the restart will not be flagged on its 6th event after — the counter starts from zero. Redis fixes this too, since the data lives outside the process and survives restarts.
+
+- **No deduplication in the async path.** If the Kafka consumer crashes after storing an event but before committing the offset, it will re-process that event on restart. The event lands in the database a second time and the repeat-offender window counts it again — inflating the threat score. The sync path avoids this because the DB write and the HTTP response happen in the same request. Fix: use `ON CONFLICT (event_id) DO NOTHING` on insert so duplicate events are silently ignored.

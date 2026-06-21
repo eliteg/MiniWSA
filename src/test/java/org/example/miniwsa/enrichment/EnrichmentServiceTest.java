@@ -19,7 +19,7 @@ import org.junit.jupiter.api.Test;
 class EnrichmentServiceTest {
 
     private final EnrichmentService service = new EnrichmentService(
-            new AttackTypeClassifier(), new ThreatScorer(100), new RepeatOffenderWindow());
+            new AttackTypeClassifier(), new ThreatScorer(100), new InMemoryRepeatOffenderDetector());
 
     private static final Instant T0 = Instant.parse("2026-05-20T14:00:00Z");
     private static final Instant RECEIVED = Instant.parse("2026-06-19T20:00:00Z");

@@ -44,6 +44,7 @@ dependencies {
     // Kafka (async streaming profile)
     implementation("org.springframework.kafka:spring-kafka")
 
+
     // Integration-test only: real Postgres via Testcontainers, wired by Spring Boot @ServiceConnection.
     integrationTestImplementation("org.springframework.boot:spring-boot-testcontainers")
     integrationTestImplementation("org.testcontainers:junit-jupiter")
